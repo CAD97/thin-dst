@@ -1,9 +1,14 @@
 [package]
-name = "thin"
-version = "1.0.0"
-authors = ["cad97 <cad97@cad97.com>"]
+name = "thin-dst"
+version = "1.0.0-beta.1"
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ["cad97 <cad97@cad97.com>"]
+description = "Thin pointers to inline-slice dynamically sized types"
 
-[dependencies]
+repository = "https://github.com/cad97/thin-dst"
+keywords = ["thin", "thin-pointer", "dst"]
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "thin"
