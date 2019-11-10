@@ -1,6 +1,6 @@
 use {
     crate::Thinnable,
-    alloc::{vec::Vec, boxed::Box},
+    alloc::{boxed::Box, vec::Vec},
     core::{
         cmp,
         ops::{Deref, DerefMut},
