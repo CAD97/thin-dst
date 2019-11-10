@@ -1,8 +1,7 @@
-use core::alloc::Layout;
 use {
     crate::{polyfill::*, Erased, Thinnable},
     alloc::{
-        alloc::{alloc, handle_alloc_error},
+        alloc::{alloc, handle_alloc_error, Layout},
         boxed::Box,
         vec::Vec,
     },
@@ -19,6 +18,9 @@ pub struct ThinBox<T: ?Sized + Thinnable> {
     raw: ptr::NonNull<Erased>,
     marker: PhantomData<Box<T>>,
 }
+
+unsafe impl<T: ?Sized + Thinnable> Send for ThinBox<T> where T: Send {}
+unsafe impl<T: ?Sized + Thinnable> Sync for ThinBox<T> where T: Sync {}
 
 thin_holder!(for ThinBox<T> as Box<T> with make_fat_mut);
 std_traits!(for ThinBox<T> as T where T: ?Sized + Thinnable);
@@ -50,7 +52,9 @@ impl<T: ?Sized + Thinnable> ThinBox<T> {
             ptr::write(ptr.cast(), head);
 
             let slice_ptr = ptr.add(slice_offset);
-            let slice = mem::transmute::<_, Vec<ManuallyDrop<T::SliceItem>>>(slice);
+            // Avoid ICE with clippy: https://github.com/rust-lang/rust/issues/66261
+            let transmute = mem::transmute;
+            let slice: Vec<ManuallyDrop<T::SliceItem>> = transmute(slice);
             ptr::copy_nonoverlapping(slice.as_ptr(), slice_ptr.cast(), len);
 
             Self::from_thin(ptr::NonNull::new_unchecked(ptr.cast()))

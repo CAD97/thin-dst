@@ -1,5 +1,6 @@
 #![no_std]
 extern crate alloc;
+extern crate self as thin;
 
 use {crate::polyfill::*, core::ptr};
 
@@ -37,7 +38,7 @@ macro_rules! make_fat {
 /// # struct Data; use std::sync::Arc;
 /// struct Node {
 ///     data: Data,
-///     children: Vec<[Arc<Node>]>
+///     children: Vec<Arc<Node>>
 /// }
 /// ```
 ///
@@ -192,7 +193,7 @@ macro_rules! thin_holder {
                 unsafe {
                     let this =
                         ManuallyDrop::new($fat::from_raw(T::make_fat_const(self.raw).as_ptr()));
-                    ManuallyDrop::into_inner(this.clone()).into()
+                    ManuallyDrop::into_inner(ManuallyDrop::clone(&this)).into()
                 }
             }
         }
@@ -258,5 +259,13 @@ macro_rules! total_std_traits {
 mod slice;
 pub use slice::ThinSlice as Slice;
 
+// TODO: consider pros/cons of ThinStr
+
 mod boxed;
 pub use boxed::ThinBox as Box;
+
+mod rc;
+pub use rc::ThinRc as Rc;
+
+mod arc;
+pub use arc::ThinArc as Arc;
