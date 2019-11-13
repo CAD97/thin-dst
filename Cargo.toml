@@ -9,6 +9,3 @@ description = "Thin pointers to inline-slice dynamically sized types"
 repository = "https://github.com/cad97/thin-dst"
 keywords = ["thin", "thin-pointer", "dst"]
 license = "MIT OR Apache-2.0"
-
-[lib]
-name = "thin"
