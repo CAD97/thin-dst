@@ -69,8 +69,13 @@ jobs:
           toolchain: nightly
           override: true
           components: miri
+      - name: Setup miri
+        uses: actions-rs/cargo@v1
+        with:
+          command: miri
+          args: setup
       - name: Run tests under miri
         uses: actions-rs/cargo@v1
         with:
           command: miri
-          args: test
+          args: test -- -- -Zunstable-options --exclude-should-panic
