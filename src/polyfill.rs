@@ -82,20 +82,14 @@ mod alloc_layout_extra {
     }
 }
 
-use core::{alloc::{Layout, LayoutErr}, mem::MaybeUninit, ptr};
+use core::alloc::{Layout, LayoutErr};
 pub fn repr_c_3(fields: [Layout; 3]) -> Result<(Layout, [usize; 3]), LayoutErr> {
-    unsafe {
-        let mut offsets: MaybeUninit<[usize; 3]> = MaybeUninit::uninit();
-        let mut offset = offsets.as_mut_ptr().cast::<usize>();
-        ptr::write(offset, 0);
-        let mut layout = fields[0];
-        offset = offset.offset(1);
-        for field in &fields[1..] {
-            let (new_layout, this_offset) = extend_layout(&layout, *field)?;
-            layout = new_layout;
-            ptr::write(offset, this_offset);
-            offset = offset.offset(1);
-        }
-        Ok((pad_layout_to_align(&layout), offsets.assume_init()))
+    let mut offsets = [0; 3];
+    let mut layout = fields[0];
+    for i in 1..3 {
+        let (new_layout, this_offset) = extend_layout(&layout, fields[i])?;
+        layout = new_layout;
+        offsets[i] = this_offset;
     }
+    Ok((pad_layout_to_align(&layout), offsets))
 }

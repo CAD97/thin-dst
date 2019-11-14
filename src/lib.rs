@@ -24,10 +24,13 @@ mod polyfill;
 pub type ErasedPtr = ptr::NonNull<priv_in_pub::Erased>;
 #[doc(hidden)]
 pub mod priv_in_pub {
+    // This MUST be size=1 such that pointer math actually advances the pointer.
     // FUTURE(extern_types): expose as `extern type`
+    // This will require casting to ptr::NonNull<u8> everywhere for pointer offsetting.
+    // But that's not a bad thing. It would have saved a good deal of headache.
     pub struct Erased {
         #[allow(unused)]
-        raw: (),
+        raw: u8,
     }
 }
 
@@ -181,10 +184,10 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
 
     fn alloc(len: usize, layout: Layout) -> ptr::NonNull<ThinData<Head, SliceItem>> {
         unsafe {
-            let ptr =
-                ptr::NonNull::new(alloc(layout)).unwrap_or_else(|| handle_alloc_error(layout));
-            // SAFETY: length is at offset 0
-            ptr::write(ptr.as_ptr().cast(), len);
+            let ptr: ErasedPtr = ptr::NonNull::new(alloc(layout))
+                .unwrap_or_else(|| handle_alloc_error(layout))
+                .cast();
+            ptr::write(ThinData::<Head, SliceItem>::length(ptr).as_ptr(), len);
             ThinData::fatten_mut(ptr.cast())
         }
     }
@@ -263,11 +266,9 @@ where
                 head_offset,
                 slice_offset,
             };
+            let slice_ptr = raw_ptr.add(slice_offset).cast::<SliceItem>();
             for slice_item in &this.slice {
-                ptr::write(
-                    raw_ptr.add(slice_offset).add(in_progress.length).cast(),
-                    slice_item.clone(),
-                );
+                ptr::write(slice_ptr.add(in_progress.length), slice_item.clone());
                 in_progress.length += 1;
             }
             in_progress.finish()
