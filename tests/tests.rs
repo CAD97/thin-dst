@@ -30,7 +30,11 @@ struct Node(ThinArc<Data, Node>);
 // is rejected as an infinitely recursive type alias expansion.
 
 impl Node {
-    fn new(head: Data, children: Vec<Node>) -> Self {
+    fn new<I>(head: Data, children: I) -> Self
+    where
+        I: IntoIterator<Item = Node>,
+        I::IntoIter: ExactSizeIterator, // + TrustedLen
+    {
         Node(ThinArc::new(head, children))
     }
 

@@ -8,7 +8,6 @@ use {
         boxed::Box,
         rc::Rc,
         sync::Arc,
-        vec::Vec,
     },
     core::{
         cmp,
@@ -299,7 +298,11 @@ pub struct ThinArc<Head, SliceItem> {
 thin_holder!(for ThinArc<Head, SliceItem> as Arc<ThinData<Head, SliceItem>> with fatten_const);
 
 impl<Head, SliceItem> ThinArc<Head, SliceItem> {
-    pub fn new(head: Head, slice: Vec<SliceItem>) -> Self {
+    pub fn new<I>(head: Head, slice: I) -> Self
+    where
+        I: IntoIterator<Item = SliceItem>,
+        I::IntoIter: ExactSizeIterator, // + TrustedLen
+    {
         // FUTURE(https://internals.rust-lang.org/t/stabilizing-a-rc-layout/11265):
         //     When/if `Arc`'s heap repr is stable, allocate directly rather than `Box` first.
         let boxed: Box<ThinData<Head, SliceItem>> = ThinBox::new(head, slice).into();
@@ -337,7 +340,11 @@ pub struct ThinRc<Head, SliceItem> {
 thin_holder!(for ThinRc<Head, SliceItem> as Rc<ThinData<Head, SliceItem>> with fatten_const);
 
 impl<Head, SliceItem> ThinRc<Head, SliceItem> {
-    pub fn new(head: Head, slice: Vec<SliceItem>) -> Self {
+    pub fn new<I>(head: Head, slice: I) -> Self
+    where
+        I: IntoIterator<Item = SliceItem>,
+        I::IntoIter: ExactSizeIterator, // + TrustedLen
+    {
         // FUTURE(https://internals.rust-lang.org/t/stabilizing-a-rc-layout/11265):
         //     When/if `Rc`'s heap repr is stable, allocate directly rather than `Box` first.
         let boxed: Box<ThinData<Head, SliceItem>> = ThinBox::new(head, slice).into();
