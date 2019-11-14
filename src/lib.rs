@@ -1,271 +1,368 @@
 #![no_std]
 extern crate alloc;
-extern crate self as thin;
 
-use {crate::polyfill::*, core::ptr};
+use {
+    crate::polyfill::*,
+    alloc::{
+        alloc::{alloc, dealloc, handle_alloc_error, Layout, LayoutErr},
+        boxed::Box,
+        rc::Rc,
+        sync::Arc,
+        vec::Vec,
+    },
+    core::{
+        cmp,
+        marker::PhantomData,
+        mem::ManuallyDrop,
+        ops::{Deref, DerefMut},
+        ptr,
+    },
+};
 
 mod polyfill;
 
-use priv_in_pub::Erased;
+pub type ErasedPtr = ptr::NonNull<priv_in_pub::Erased>;
 #[doc(hidden)]
 pub mod priv_in_pub {
+    // This MUST be size=1 such that pointer math actually advances the pointer.
     // FUTURE(extern_types): expose as `extern type`
+    // This will require casting to ptr::NonNull<u8> everywhere for pointer offsetting.
+    // But that's not a bad thing. It would have saved a good deal of headache.
     pub struct Erased {
         #[allow(unused)]
-        raw: (),
+        raw: u8,
     }
 }
 
-/// Implement `Thinnable::make_fat`.
-///
-/// All this does is an `as`-cast between the erased slice type and a self pointer.
-#[macro_export]
-macro_rules! make_fat {
-    () => {
-        fn make_fat(ptr: *mut [$crate::priv_in_pub::Erased]) -> *mut Self {
-            ptr as *mut Self
-        }
-    };
+#[repr(C)]
+#[derive(Debug, Eq, PartialEq, Hash)]
+pub struct ThinData<Head, SliceItem> {
+    // NB: Optimal layout packing is
+    //     align(usize) < align(head) => head before len
+    //     align(head) < align(usize) => len before head
+    // We put len first because
+    //     a) it's much simpler to go from ErasedPtr to ptr-to-length
+    //     b) it's rare for types to have align > align(usize)
+    // For optimality, we should use repr(Rust) and pointer projection or offset_of!
+    // We don't do that for now since we can avoid the unsoundness of offset_of!,
+    // and offset_of! doesn't work for ?Sized types anyway.
+    // SAFETY: must be length of self.slice
+    len: usize,
+    pub head: Head,
+    pub slice: [SliceItem],
 }
 
-/// Types that hold an inline slice and the length of that slice in the same allocation.
-///
-/// # Example
-///
-/// Consider an `Arc`-tree node:
-///
-/// ```rust
-/// # struct Data; use std::sync::Arc;
-/// struct Node {
-///     data: Data,
-///     children: Vec<Arc<Node>>
-/// }
-/// ```
-///
-/// This incurs a double indirection: once to the node and once to the children,
-/// even though `Node` may always only be exposed behind an `Arc`.
-///
-/// Instead, you can store the children slice inline with the data allocation:
-///
-/// ```rust
-/// # struct Data { children_len: usize }; use std::sync::Arc;
-/// # use thin::{Thinnable, make_fat};
-/// #[repr(C)]
-/// struct Node {
-///     data: Data, // MUST include length of the following slice!
-///     children: [Arc<Node>],
-/// }
-///
-/// unsafe impl Thinnable for Node {
-///     type Head = Data;
-///     type SliceItem = Arc<Node>;
-///
-///     make_fat!();
-///     fn get_length(head: &Data) -> usize {
-///         head.children_len
-///     }
-/// }
-/// ```
-///
-/// `&Node` and `Arc<Node>` will be like `&[_]` and `Arc<[_]>`; a fat `(pointer, length)` pair.
-/// You can also use `thin::Box` and `thin::Arc` to get owned thin pointers.
-/// These types are also how you allocate a type defined like this.
-///
-/// The type _MUST_ be `#[repr(C)]` and composed of just a head the slice tail,
-/// otherwise arbitrary functionality of this crate may cause undefined behavior.
-pub unsafe trait Thinnable {
-    /// The sized part of the allocation.
-    type Head: Sized;
-
-    /// The item type of the slice part of the allocation.
-    type SliceItem: Sized;
-
-    /// Extract the slice length from the head.
-    fn get_length(head: &Self::Head) -> usize;
-
-    /// Make a fat pointer from an erased one.
-    ///
-    /// This is implemented by calling `make_fat!()`.
-    ///
-    /// Note that the input erased pointer is not actually a thin pointer;
-    /// `make_fat_const` and `make_fat_mut` take a thin erased pointer.
-    fn make_fat(ptr: *mut [Erased]) -> *mut Self;
-
-    /// Make an erased thin pointer from a fat one.
-    fn make_thin(fat: ptr::NonNull<Self>) -> ptr::NonNull<Erased> {
-        fat.cast()
+impl<Head, SliceItem> ThinData<Head, SliceItem> {
+    fn len(ptr: ErasedPtr) -> ptr::NonNull<usize> {
+        ptr.cast()
     }
 
-    /// Make a fat pointer from an erased one, using `*const` functions.
-    ///
-    /// # Safety
-    ///
-    /// `thin` must be a valid erased pointer to `Self`.
-    ///
-    /// This materializes a `&`-reference on stable, thus unique mutation
-    /// after using this function is not necessarily allowed. Use
-    /// `make_fat_mut` instead if you have unique access.
-    unsafe fn make_fat_const(thin: ptr::NonNull<Erased>) -> ptr::NonNull<Self> {
-        let len = Self::get_length(thin.cast().as_ref());
-        ptr::NonNull::new_unchecked(Self::make_fat(make_slice(thin.as_ptr(), len) as *mut _))
+    fn erase(ptr: ptr::NonNull<Self>) -> ErasedPtr {
+        ptr.cast()
     }
 
-    /// Make a fat pointer from an erased one, using `*mut` functions.
-    ///
-    /// # Safety
-    ///
-    /// `thin` must be a valid erased pointer to `Self`.
-    ///
-    /// This materializes a `&mut`-reference on stable, thus should only be
-    /// used when the thin pointer is sourced from a unique borrow. Use
-    /// `make_fat_const` instead if you have shared access.
-    unsafe fn make_fat_mut(thin: ptr::NonNull<Erased>) -> ptr::NonNull<Self> {
-        let len = Self::get_length(thin.cast().as_ref());
-        ptr::NonNull::new_unchecked(Self::make_fat(make_slice_mut(thin.as_ptr(), len)))
+    unsafe fn fatten_const(ptr: ErasedPtr) -> ptr::NonNull<Self> {
+        let len = ptr::read(Self::len(ptr).as_ptr());
+        let slice = make_slice(ptr.cast::<SliceItem>().as_ptr(), len);
+        ptr::NonNull::new_unchecked(slice as *const Self as *mut Self)
+    }
+
+    unsafe fn fatten_mut(ptr: ErasedPtr) -> ptr::NonNull<Self> {
+        let len = ptr::read(Self::len(ptr).as_ptr());
+        let slice = make_slice_mut(ptr.cast::<SliceItem>().as_ptr(), len);
+        ptr::NonNull::new_unchecked(slice as *mut Self)
     }
 }
 
 macro_rules! thin_holder {
-    ( for $thin:ident<T> as $fat:ident<T> with $make_fat:ident ) => {
-        impl<T: ?Sized + Thinnable> Drop for $thin<T> {
+    ( for $thin:ident<Head, SliceItem> as $fat:ident<ThinData<Head, SliceItem>> with $fatten:ident ) => {
+        impl<Head, SliceItem> Drop for $thin<Head, SliceItem> {
             fn drop(&mut self) {
-                unsafe { drop::<$fat<T>>($fat::from_raw(T::$make_fat(self.raw).as_ptr())) }
+                let this = unsafe { $fat::from_raw(ThinData::$fatten(self.raw).as_ptr()) };
+                drop::<$fat<ThinData<Head, SliceItem>>>(this)
             }
         }
 
-        impl<T: ?Sized + Thinnable> $thin<T> {
-            /// Construct an owned thin pointer from a raw thin pointer.
+        impl<Head, SliceItem> $thin<Head, SliceItem> {
+            /// Construct an owned pointer from an erased pointer.
             ///
             /// # Safety
             ///
             /// This pointer must logically own a valid instance of `Self`.
-            pub unsafe fn from_thin(thin: ptr::NonNull<Erased>) -> Self {
+            pub unsafe fn from_erased(ptr: ErasedPtr) -> Self {
                 Self {
-                    raw: thin,
+                    raw: ptr,
                     marker: PhantomData,
                 }
             }
 
-            /// Convert this owned thin pointer into a raw thin pointer.
+            /// Convert this owned pointer into an erased pointer.
             ///
             /// To avoid a memory leak the pointer must be converted back
-            /// using `Self::from_raw`.
-            pub fn into_thin(this: Self) -> ptr::NonNull<Erased> {
+            /// using `Self::from_erased`.
+            pub fn erase(this: Self) -> ErasedPtr {
                 let this = ManuallyDrop::new(this);
                 this.raw
             }
+        }
 
-            /// Construct an owned thin pointer from a raw fat pointer.
-            ///
-            /// # Safety
-            ///
-            /// This pointer must logically own a valid instance of `Self`.
-            pub unsafe fn from_fat(fat: ptr::NonNull<T>) -> Self {
-                Self::from_thin(T::make_thin(fat))
-            }
-
-            /// Convert this owned thin pointer into an owned fat pointer.
-            ///
-            /// This is the std type that this type pretends to be.
-            /// You can convert freely between the two representations
-            /// with this function and `Self::from(fat)`.
-            pub fn into_fat(this: Self) -> $fat<T> {
+        impl<Head, SliceItem> From<$fat<ThinData<Head, SliceItem>>> for $thin<Head, SliceItem> {
+            fn from(this: $fat<ThinData<Head, SliceItem>>) -> $thin<Head, SliceItem> {
                 unsafe {
-                    let this = ManuallyDrop::new(this);
-                    $fat::from_raw(T::$make_fat(this.raw).as_ptr())
+                    let this = ptr::NonNull::new_unchecked($fat::into_raw(this) as *mut _);
+                    Self::from_erased(ThinData::<Head, SliceItem>::erase(this))
                 }
             }
         }
 
-        impl<T: ?Sized + Thinnable> From<$fat<T>> for $thin<T> {
-            fn from(this: $fat<T>) -> $thin<T> {
-                unsafe {
-                    $thin::from_fat(ptr::NonNull::new_unchecked($fat::into_raw(this) as *mut _))
-                }
-            }
-        }
-
-        impl<T: ?Sized + Thinnable> Clone for $thin<T>
+        impl<Head, SliceItem> Deref for $thin<Head, SliceItem>
         where
-            $fat<T>: Clone,
+            $fat<ThinData<Head, SliceItem>>: Deref,
         {
-            fn clone(&self) -> Self {
+            type Target = ThinData<Head, SliceItem>;
+            fn deref(&self) -> &ThinData<Head, SliceItem> {
+                unsafe { &*ThinData::fatten_const(self.raw).as_ptr() }
+            }
+        }
+
+        impl<Head, SliceItem> DerefMut for $thin<Head, SliceItem>
+        where
+            $fat<ThinData<Head, SliceItem>>: DerefMut,
+        {
+            fn deref_mut(&mut self) -> &mut ThinData<Head, SliceItem> {
+                unsafe { &mut *ThinData::fatten_mut(self.raw).as_ptr() }
+            }
+        }
+
+        impl<Head, SliceItem> core::fmt::Debug for $thin<Head, SliceItem>
+        where
+            ThinData<Head, SliceItem>: core::fmt::Debug,
+        {
+            fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+                <ThinData<Head, SliceItem> as core::fmt::Debug>::fmt(self, f)
+            }
+        }
+
+        unsafe impl<Head, SliceItem> Send for $thin<Head, SliceItem> where
+            $fat<ThinData<Head, SliceItem>>: Send
+        {
+        }
+        unsafe impl<Head, SliceItem> Sync for $thin<Head, SliceItem> where
+            $fat<ThinData<Head, SliceItem>>: Sync
+        {
+        }
+
+        impl<Head, SliceItem> cmp::Eq for $thin<Head, SliceItem> where
+            ThinData<Head, SliceItem>: cmp::Eq
+        {
+        }
+        impl<Head, SliceItem> cmp::PartialEq for $thin<Head, SliceItem>
+        where
+            ThinData<Head, SliceItem>: cmp::PartialEq,
+        {
+            fn eq(&self, other: &Self) -> bool {
+                <ThinData<Head, SliceItem> as cmp::PartialEq>::eq(self, other)
+            }
+        }
+    };
+}
+
+pub struct ThinBox<Head, SliceItem> {
+    raw: ErasedPtr,
+    marker: PhantomData<Box<ThinData<Head, SliceItem>>>,
+}
+
+thin_holder!(for ThinBox<Head, SliceItem> as Box<ThinData<Head, SliceItem>> with fatten_mut);
+
+impl<Head, SliceItem> ThinBox<Head, SliceItem> {
+    fn layout(len: usize) -> Result<(Layout, [usize; 3]), LayoutErr> {
+        let length_layout = Layout::new::<usize>();
+        let head_layout = Layout::new::<Head>();
+        let slice_layout = layout_array::<SliceItem>(len)?;
+        repr_c_3([length_layout, head_layout, slice_layout])
+    }
+
+    unsafe fn alloc(len: usize, layout: Layout) -> ptr::NonNull<ThinData<Head, SliceItem>> {
+        let ptr: ErasedPtr = ptr::NonNull::new(alloc(layout))
+            .unwrap_or_else(|| handle_alloc_error(layout))
+            .cast();
+        ptr::write(ThinData::<Head, SliceItem>::len(ptr).as_ptr(), len);
+        ThinData::fatten_mut(ptr.cast())
+    }
+
+    pub fn new<I>(head: Head, slice: I) -> Self
+    where
+        I: IntoIterator<Item = SliceItem>,
+        I::IntoIter: ExactSizeIterator, // + TrustedLen
+    {
+        let mut items = slice.into_iter();
+        let len = items.len();
+        let (layout, [_, head_offset, slice_offset]) =
+            Self::layout(len).unwrap_or_else(|e| panic!("oversize box: {}", e));
+
+        unsafe {
+            let ptr = Self::alloc(len, layout);
+            let raw_ptr = ThinData::erase(ptr).as_ptr();
+            ptr::write(raw_ptr.add(head_offset).cast(), head);
+            let mut slice_ptr = raw_ptr.add(slice_offset).cast::<SliceItem>();
+            for _ in 0..len {
+                let slice_item = items
+                    .next()
+                    .expect("ExactSizeIterator over-reported length");
+                ptr::write(slice_ptr, slice_item);
+                slice_ptr = slice_ptr.offset(1);
+            }
+            assert!(
+                items.next().is_none(),
+                "ExactSizeIterator under-reported length"
+            );
+            Self::from_erased(ThinData::erase(ptr))
+        }
+    }
+}
+
+impl<Head, SliceItem> From<ThinBox<Head, SliceItem>> for Box<ThinData<Head, SliceItem>> {
+    fn from(this: ThinBox<Head, SliceItem>) -> Self {
+        unsafe {
+            let this = ManuallyDrop::new(this);
+            Box::from_raw(ThinData::fatten_mut(this.raw).as_ptr())
+        }
+    }
+}
+
+impl<Head, SliceItem> Clone for ThinBox<Head, SliceItem>
+where
+    Head: Clone,
+    SliceItem: Clone,
+{
+    fn clone(&self) -> Self {
+        struct InProgressThinBox<Head, SliceItem> {
+            raw: ptr::NonNull<ThinData<Head, SliceItem>>,
+            len: usize,
+            layout: Layout,
+            head_offset: usize,
+            slice_offset: usize,
+        }
+
+        impl<Head, SliceItem> Drop for InProgressThinBox<Head, SliceItem> {
+            fn drop(&mut self) {
+                let raw_ptr = ThinData::erase(self.raw).as_ptr();
                 unsafe {
-                    let this =
-                        ManuallyDrop::new($fat::from_raw(T::make_fat_const(self.raw).as_ptr()));
-                    ManuallyDrop::into_inner(ManuallyDrop::clone(&this)).into()
+                    ptr::drop_in_place(raw_ptr.add(self.head_offset));
+                    let slice = make_slice_mut(
+                        raw_ptr.add(self.slice_offset).cast::<SliceItem>(),
+                        self.len,
+                    );
+                    ptr::drop_in_place(slice);
+                    dealloc(raw_ptr.cast(), self.layout);
                 }
             }
         }
 
-        impl<T: ?Sized + Thinnable> Deref for $thin<T> {
-            type Target = T;
-            fn deref(&self) -> &T {
-                unsafe { &*T::make_fat_const(self.raw).as_ptr() }
+        impl<Head, SliceItem> InProgressThinBox<Head, SliceItem> {
+            unsafe fn finish(self) -> ThinBox<Head, SliceItem> {
+                let this = ManuallyDrop::new(self);
+                ThinBox::from_erased(ThinData::erase(this.raw))
             }
         }
-    };
+
+        unsafe {
+            let this = ThinData::<Head, SliceItem>::fatten_const(self.raw);
+            let this = this.as_ref();
+            let len = this.len;
+            let (layout, [_, head_offset, slice_offset]) = Self::layout(len).unwrap();
+            let ptr = Self::alloc(len, layout);
+            let raw_ptr = ThinData::erase(ptr).as_ptr();
+            ptr::write(raw_ptr.add(head_offset).cast(), this.head.clone());
+            let mut in_progress = InProgressThinBox {
+                raw: ptr,
+                len: 0,
+                layout,
+                head_offset,
+                slice_offset,
+            };
+            let slice_ptr = raw_ptr.add(slice_offset).cast::<SliceItem>();
+            for slice_item in &this.slice {
+                ptr::write(slice_ptr.add(in_progress.len), slice_item.clone());
+                in_progress.len += 1;
+            }
+            in_progress.finish()
+        }
+    }
 }
 
-macro_rules! std_traits {
-    (for $ty:ident $(<$T:ident>)? as $raw:ty $(where $($tt:tt)*)?) => {
-        impl $(<$T>)? core::fmt::Debug for $ty $(<$T>)? where $raw: core::fmt::Debug, $($($tt)*)? {
-            fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-                <$raw as core::fmt::Debug>::fmt(self, f)
-            }
-        }
-        impl $(<$T>)? core::fmt::Display for $ty $(<$T>)? where $raw: core::fmt::Display, $($($tt)*)? {
-            fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-                <$raw as core::fmt::Display>::fmt(self, f)
-            }
-        }
-        impl<$($T,)? O: ?Sized> cmp::PartialOrd<O> for $ty $(<$T>)? where $raw: cmp::PartialOrd<O>, $($($tt)*)? {
-            fn partial_cmp(&self, other: &O) -> Option<cmp::Ordering> {
-                <$raw as cmp::PartialOrd<O>>::partial_cmp(self, other)
-            }
-        }
-        impl<$($T,)? O: ?Sized> cmp::PartialEq<O> for $ty $(<$T>)? where $raw: cmp::PartialEq<O>, $($($tt)*)? {
-            fn eq(&self, other: &O) -> bool {
-                <$raw as cmp::PartialEq<O>>::eq(self, other)
-            }
-        }
-    };
+pub struct ThinArc<Head, SliceItem> {
+    raw: ErasedPtr,
+    marker: PhantomData<Arc<ThinData<Head, SliceItem>>>,
 }
 
-// FUTURE: I think it requires specialization? Get PartialEq/PartialOrd/Eq/Ord for `thin_holder!`s
-macro_rules! total_std_traits {
-    (for $ty:ident $(<$T:ident>)? as $raw:ty $(where $($tt:tt)*)?) => {
-        std_traits!(for $ty $(<$T>)? as $raw $(where $($tt:tt)*)?);
+thin_holder!(for ThinArc<Head, SliceItem> as Arc<ThinData<Head, SliceItem>> with fatten_const);
 
-        impl $(<$T>)? cmp::Eq for $ty $(<$T>)? where $raw: cmp::Eq, $($($tt)*)? {}
-        impl $(<$T>)? cmp::Ord for $ty $(<$T>)? where $raw: cmp::Ord, $($($tt)*)? {
-            fn cmp(&self, other: &Self) -> cmp::Ordering {
-                <$raw as cmp::Ord>::cmp(self, other)
-            }
-        }
-        impl $(<$T>)? cmp::PartialEq for $ty $(<$T>)? where $raw: cmp::PartialEq, $($($tt)*)? {
-            fn eq(&self, other: &Self) -> bool {
-                <$raw as cmp::PartialEq>::eq(self, other)
-            }
-        }
-        impl $(<$T>)? cmp::PartialOrd for $ty $(<$T>)? where $raw: cmp::PartialOrd, $($($tt)*)? {
-            fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-                <$raw as cmp::PartialOrd>::partial_cmp(self, other)
-            }
-        }
-    };
+impl<Head, SliceItem> ThinArc<Head, SliceItem> {
+    pub fn new(head: Head, slice: Vec<SliceItem>) -> Self {
+        // FUTURE(https://internals.rust-lang.org/t/stabilizing-a-rc-layout/11265):
+        //     When/if `Arc`'s heap repr is stable, allocate directly rather than `Box` first.
+        let boxed: Box<ThinData<Head, SliceItem>> = ThinBox::new(head, slice).into();
+        let arc: Arc<ThinData<Head, SliceItem>> = boxed.into();
+        arc.into()
+    }
 }
 
-mod slice;
-pub use slice::ThinSlice as Slice;
+impl<Head, SliceItem> Into<Arc<ThinData<Head, SliceItem>>> for ThinArc<Head, SliceItem> {
+    fn into(self) -> Arc<ThinData<Head, SliceItem>> {
+        unsafe {
+            let this = ManuallyDrop::new(self);
+            Arc::from_raw(ThinData::fatten_const(this.raw).as_ptr())
+        }
+    }
+}
 
-// TODO: consider pros/cons of ThinStr
+impl<Head, SliceItem> Clone for ThinArc<Head, SliceItem>
+where
+    Arc<ThinData<Head, SliceItem>>: Clone,
+{
+    fn clone(&self) -> Self {
+        unsafe {
+            let this = ManuallyDrop::new(Arc::from_raw(ThinData::fatten_const(self.raw).as_ptr()));
+            ManuallyDrop::into_inner(ManuallyDrop::clone(&this)).into()
+        }
+    }
+}
 
-mod boxed;
-pub use boxed::ThinBox as Box;
+pub struct ThinRc<Head, SliceItem> {
+    raw: ErasedPtr,
+    marker: PhantomData<Rc<ThinData<Head, SliceItem>>>,
+}
 
-mod rc;
-pub use rc::ThinRc as Rc;
+thin_holder!(for ThinRc<Head, SliceItem> as Rc<ThinData<Head, SliceItem>> with fatten_const);
 
-mod arc;
-pub use arc::ThinArc as Arc;
+impl<Head, SliceItem> ThinRc<Head, SliceItem> {
+    pub fn new(head: Head, slice: Vec<SliceItem>) -> Self {
+        // FUTURE(https://internals.rust-lang.org/t/stabilizing-a-rc-layout/11265):
+        //     When/if `Rc`'s heap repr is stable, allocate directly rather than `Box` first.
+        let boxed: Box<ThinData<Head, SliceItem>> = ThinBox::new(head, slice).into();
+        let arc: Rc<ThinData<Head, SliceItem>> = boxed.into();
+        arc.into()
+    }
+}
+
+impl<Head, SliceItem> Into<Rc<ThinData<Head, SliceItem>>> for ThinRc<Head, SliceItem> {
+    fn into(self) -> Rc<ThinData<Head, SliceItem>> {
+        unsafe {
+            let this = ManuallyDrop::new(self);
+            Rc::from_raw(ThinData::fatten_const(this.raw).as_ptr())
+        }
+    }
+}
+
+impl<Head, SliceItem> Clone for ThinRc<Head, SliceItem>
+where
+    Rc<ThinData<Head, SliceItem>>: Clone,
+{
+    fn clone(&self) -> Self {
+        unsafe {
+            let this = ManuallyDrop::new(Rc::from_raw(ThinData::fatten_const(self.raw).as_ptr()));
+            ManuallyDrop::into_inner(ManuallyDrop::clone(&this)).into()
+        }
+    }
+}
