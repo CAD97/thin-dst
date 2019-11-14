@@ -10,7 +10,7 @@ use {
         sync::Arc,
     },
     core::{
-        cmp,
+        cmp, hash,
         marker::PhantomData,
         mem::ManuallyDrop,
         ops::{Deref, DerefMut},
@@ -161,6 +161,18 @@ macro_rules! thin_holder {
         {
             fn eq(&self, other: &Self) -> bool {
                 <ThinData<Head, SliceItem> as cmp::PartialEq>::eq(self, other)
+            }
+        }
+
+        impl<Head, SliceItem> hash::Hash for $thin<Head, SliceItem>
+        where
+            ThinData<Head, SliceItem>: hash::Hash,
+        {
+            fn hash<H>(&self, state: &mut H)
+            where
+                H: hash::Hasher,
+            {
+                <ThinData<Head, SliceItem> as hash::Hash>::hash(self, state)
             }
         }
     };
