@@ -63,13 +63,13 @@ impl<Head, SliceItem> ThinData<Head, SliceItem> {
 
     unsafe fn fatten_const(ptr: ErasedPtr) -> ptr::NonNull<Self> {
         let len = ptr::read(Self::len(ptr).as_ptr());
-        let slice = make_slice(ptr.as_ptr(), len);
+        let slice = make_slice(ptr.cast::<SliceItem>().as_ptr(), len);
         ptr::NonNull::new_unchecked(slice as *const Self as *mut Self)
     }
 
     unsafe fn fatten_mut(ptr: ErasedPtr) -> ptr::NonNull<Self> {
         let len = ptr::read(Self::len(ptr).as_ptr());
-        let slice = make_slice_mut(ptr.as_ptr(), len);
+        let slice = make_slice_mut(ptr.cast::<SliceItem>().as_ptr(), len);
         ptr::NonNull::new_unchecked(slice as *mut Self)
     }
 }
@@ -237,7 +237,10 @@ where
                 let raw_ptr = ThinData::erase(self.raw).as_ptr();
                 unsafe {
                     ptr::drop_in_place(raw_ptr.add(self.head_offset));
-                    let slice = make_slice_mut(raw_ptr.add(self.slice_offset), self.len);
+                    let slice = make_slice_mut(
+                        raw_ptr.add(self.slice_offset).cast::<SliceItem>(),
+                        self.len,
+                    );
                     ptr::drop_in_place(slice);
                     dealloc(raw_ptr.cast(), self.layout);
                 }

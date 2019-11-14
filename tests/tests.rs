@@ -13,6 +13,13 @@ fn slice() {
     let slice = slice.clone();
 }
 
+#[test]
+fn zst() {
+    let slice: Vec<()> = vec![(); 16];
+    let slice: ThinBox<(), ()> = ThinBox::new((), slice);
+    let slice = slice.clone();
+}
+
 type Data = usize;
 #[repr(transparent)]
 #[derive(Debug, Clone)]
