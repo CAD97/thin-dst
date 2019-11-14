@@ -38,22 +38,22 @@ pub mod priv_in_pub {
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct ThinData<Head, SliceItem> {
     // NB: Optimal layout packing is
-    //     align(usize) < align(head) => head before length
-    //     align(head) < align(usize) => length before head
-    // We put length first because
+    //     align(usize) < align(head) => head before len
+    //     align(head) < align(usize) => len before head
+    // We put len first because
     //     a) it's much simpler to go from ErasedPtr to ptr-to-length
     //     b) it's rare for types to have align > align(usize)
     // For optimality, we should use repr(Rust) and pointer projection or offset_of!
     // We don't do that for now since we can avoid the unsoundness of offset_of!,
     // and offset_of! doesn't work for ?Sized types anyway.
     // SAFETY: must be length of self.slice
-    length: usize,
+    len: usize,
     pub head: Head,
     pub slice: [SliceItem],
 }
 
 impl<Head, SliceItem> ThinData<Head, SliceItem> {
-    fn length(ptr: ErasedPtr) -> ptr::NonNull<usize> {
+    fn len(ptr: ErasedPtr) -> ptr::NonNull<usize> {
         ptr.cast()
     }
 
@@ -62,13 +62,13 @@ impl<Head, SliceItem> ThinData<Head, SliceItem> {
     }
 
     unsafe fn fatten_const(ptr: ErasedPtr) -> ptr::NonNull<Self> {
-        let len = ptr::read(Self::length(ptr).as_ptr());
+        let len = ptr::read(Self::len(ptr).as_ptr());
         let slice = make_slice(ptr.as_ptr(), len);
         ptr::NonNull::new_unchecked(slice as *const Self as *mut Self)
     }
 
     unsafe fn fatten_mut(ptr: ErasedPtr) -> ptr::NonNull<Self> {
-        let len = ptr::read(Self::length(ptr).as_ptr());
+        let len = ptr::read(Self::len(ptr).as_ptr());
         let slice = make_slice_mut(ptr.as_ptr(), len);
         ptr::NonNull::new_unchecked(slice as *mut Self)
     }
@@ -187,7 +187,7 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
             let ptr: ErasedPtr = ptr::NonNull::new(alloc(layout))
                 .unwrap_or_else(|| handle_alloc_error(layout))
                 .cast();
-            ptr::write(ThinData::<Head, SliceItem>::length(ptr).as_ptr(), len);
+            ptr::write(ThinData::<Head, SliceItem>::len(ptr).as_ptr(), len);
             ThinData::fatten_mut(ptr.cast())
         }
     }
@@ -226,7 +226,7 @@ where
     fn clone(&self) -> Self {
         struct InProgressThinBox<Head, SliceItem> {
             raw: ptr::NonNull<ThinData<Head, SliceItem>>,
-            length: usize,
+            len: usize,
             layout: Layout,
             head_offset: usize,
             slice_offset: usize,
@@ -237,7 +237,7 @@ where
                 let raw_ptr = ThinData::erase(self.raw).as_ptr();
                 unsafe {
                     ptr::drop_in_place(raw_ptr.add(self.head_offset));
-                    let slice = make_slice_mut(raw_ptr.add(self.slice_offset), self.length);
+                    let slice = make_slice_mut(raw_ptr.add(self.slice_offset), self.len);
                     ptr::drop_in_place(slice);
                     dealloc(raw_ptr.cast(), self.layout);
                 }
@@ -254,22 +254,22 @@ where
         unsafe {
             let this = ThinData::<Head, SliceItem>::fatten_const(self.raw);
             let this = this.as_ref();
-            let len = this.length;
+            let len = this.len;
             let (layout, [_, head_offset, slice_offset]) = Self::layout(len).unwrap();
             let ptr = Self::alloc(len, layout);
             let raw_ptr = ThinData::erase(ptr).as_ptr();
             ptr::write(raw_ptr.add(head_offset).cast(), this.head.clone());
             let mut in_progress = InProgressThinBox {
                 raw: ptr,
-                length: 0,
+                len: 0,
                 layout,
                 head_offset,
                 slice_offset,
             };
             let slice_ptr = raw_ptr.add(slice_offset).cast::<SliceItem>();
             for slice_item in &this.slice {
-                ptr::write(slice_ptr.add(in_progress.length), slice_item.clone());
-                in_progress.length += 1;
+                ptr::write(slice_ptr.add(in_progress.len), slice_item.clone());
+                in_progress.len += 1;
             }
             in_progress.finish()
         }
