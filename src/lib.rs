@@ -13,7 +13,7 @@ use {
     core::{
         cmp,
         marker::PhantomData,
-        mem::{self, ManuallyDrop},
+        mem::ManuallyDrop,
         ops::{Deref, DerefMut},
         ptr,
     },
@@ -182,28 +182,40 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
         repr_c_3([length_layout, head_layout, slice_layout])
     }
 
-    fn alloc(len: usize, layout: Layout) -> ptr::NonNull<ThinData<Head, SliceItem>> {
-        unsafe {
-            let ptr: ErasedPtr = ptr::NonNull::new(alloc(layout))
-                .unwrap_or_else(|| handle_alloc_error(layout))
-                .cast();
-            ptr::write(ThinData::<Head, SliceItem>::len(ptr).as_ptr(), len);
-            ThinData::fatten_mut(ptr.cast())
-        }
+    unsafe fn alloc(len: usize, layout: Layout) -> ptr::NonNull<ThinData<Head, SliceItem>> {
+        let ptr: ErasedPtr = ptr::NonNull::new(alloc(layout))
+            .unwrap_or_else(|| handle_alloc_error(layout))
+            .cast();
+        ptr::write(ThinData::<Head, SliceItem>::len(ptr).as_ptr(), len);
+        ThinData::fatten_mut(ptr.cast())
     }
 
-    pub fn new(head: Head, slice: Vec<SliceItem>) -> Self {
-        let len = slice.len();
+    pub fn new<I>(head: Head, slice: I) -> Self
+    where
+        I: IntoIterator<Item = SliceItem>,
+        I::IntoIter: ExactSizeIterator, // + TrustedLen
+    {
+        let mut items = slice.into_iter();
+        let len = items.len();
         let (layout, [_, head_offset, slice_offset]) =
             Self::layout(len).unwrap_or_else(|e| panic!("oversize box: {}", e));
-        let ptr = Self::alloc(len, layout);
-        let raw_ptr = ThinData::erase(ptr).as_ptr();
 
         unsafe {
+            let ptr = Self::alloc(len, layout);
+            let raw_ptr = ThinData::erase(ptr).as_ptr();
             ptr::write(raw_ptr.add(head_offset).cast(), head);
-            let slice_ptr = raw_ptr.add(slice_offset);
-            let slice: Vec<ManuallyDrop<SliceItem>> = mem::transmute(slice);
-            ptr::copy_nonoverlapping(slice.as_ptr(), slice_ptr.cast(), len);
+            let mut slice_ptr = raw_ptr.add(slice_offset).cast::<SliceItem>();
+            for _ in 0..len {
+                let slice_item = items
+                    .next()
+                    .expect("ExactSizeIterator over-reported length");
+                ptr::write(slice_ptr, slice_item);
+                slice_ptr = slice_ptr.offset(1);
+            }
+            assert!(
+                items.next().is_none(),
+                "ExactSizeIterator under-reported length"
+            );
             Self::from_erased(ThinData::erase(ptr))
         }
     }
