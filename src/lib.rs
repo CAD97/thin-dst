@@ -1,3 +1,37 @@
+//! Boxed custom DSTs that store a slice and the length of said slice inline.
+//! Uses the standard library collection types for full interoperability,
+//! and also provides thin owned pointers for space-conscious use.
+//!
+//! # Examples
+//!
+//! The simplest example is just a boxed slice:
+//!
+//! ```rust
+//! # use thin_dst::*;
+//! let boxed_slice = ThinBox::new((), vec![0, 1, 2, 3, 4, 5]);
+//! assert_eq!(&*boxed_slice, &[0, 1, 2, 3, 4, 5][..]);
+//! let boxed_slice: Box<ThinData<(), u32>> = boxed_slice.into();
+//! ```
+//!
+//! All of the thin collection types are constructed with a "head" and a "tail".
+//! The head is any `Sized` type that you would like to associate with the slice.
+//! The "tail" is the owned slice of data that you would like to store.
+//!
+//! This creates a collection of `ThinData`, which acts like `{ head, tail }`,
+//! and also handles the `unsafe` required for both custom slice DSTs and thin DST pointers.
+//! The most idiomatic usage is to encapsulate the use of thin-dst with a transparent newtype:
+//!
+//! ```rust
+//! # use thin_dst::*; struct NodeHead;
+//! #[repr(transparent)]
+//! struct NodeData(ThinData<NodeHead, Node>);
+//! struct Node(ThinArc<NodeHead, Node>);
+//! ```
+//!
+//! And then use `NodeData` by transmuting and/or [ref-cast]ing as needed.
+//!
+//!   [ref-cast]: <https://lib.rs/crates/ref-cast>
+
 #![no_std]
 extern crate alloc;
 
@@ -20,11 +54,12 @@ use {
 
 mod polyfill;
 
+/// An erased pointer with size and stride of one byte.
 pub type ErasedPtr = ptr::NonNull<priv_in_pub::Erased>;
 #[doc(hidden)]
 pub mod priv_in_pub {
     // This MUST be size=1 such that pointer math actually advances the pointer.
-    // FUTURE(extern_types): expose as `extern type`
+    // FUTURE(extern_types): expose as `extern type` (breaking)
     // This will require casting to ptr::NonNull<u8> everywhere for pointer offsetting.
     // But that's not a bad thing. It would have saved a good deal of headache.
     pub struct Erased {
@@ -33,6 +68,15 @@ pub mod priv_in_pub {
     }
 }
 
+/// A custom slice-holding dynamically sized type.
+/// Stores slice length inline to be thin-pointer compatible.
+///
+/// # Stability
+///
+/// Note that even though this struct is `#[repr(C)]`,
+/// the offsets of its public fields are _not public_.
+/// A private field appears before them,
+/// so their offset should be treated as being unknown.
 #[repr(C)]
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct ThinData<Head, SliceItem> {
@@ -47,7 +91,9 @@ pub struct ThinData<Head, SliceItem> {
     // and offset_of! doesn't work for ?Sized types anyway.
     // SAFETY: must be length of self.slice
     len: usize,
+    /// The sized portion of this DST.
     pub head: Head,
+    /// The slice portion of this DST.
     pub slice: [SliceItem],
 }
 
@@ -70,6 +116,12 @@ impl<Head, SliceItem> ThinData<Head, SliceItem> {
         let len = ptr::read(Self::len(ptr).as_ptr());
         let slice = make_slice_mut(ptr.cast::<SliceItem>().as_ptr(), len);
         ptr::NonNull::new_unchecked(slice as *mut Self)
+    }
+}
+
+impl<SliceItem: PartialEq> PartialEq<[SliceItem]> for ThinData<(), SliceItem> {
+    fn eq(&self, other: &[SliceItem]) -> bool {
+        &self.slice == other
     }
 }
 
@@ -178,6 +230,9 @@ macro_rules! thin_holder {
     };
 }
 
+/// A thin version of [`Box`].
+///
+///   [`Box`]: <https://doc.rust-lang.org/stable/std/boxed/struct.Box.html>
 pub struct ThinBox<Head, SliceItem> {
     raw: ErasedPtr,
     marker: PhantomData<Box<ThinData<Head, SliceItem>>>,
@@ -201,6 +256,13 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
         ThinData::fatten_mut(ptr.cast())
     }
 
+    /// Create a new boxed `ThinData` with the given head and slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice iterator incorrectly reports its length.
+    /// Leaks everything on panic.
+    //  TODO: dont (see `Clone::clone`)
     pub fn new<I>(head: Head, slice: I) -> Self
     where
         I: IntoIterator<Item = SliceItem>,
@@ -246,6 +308,8 @@ where
     Head: Clone,
     SliceItem: Clone,
 {
+    // TODO: this should be able to just be
+    //     ThinBox::new(self.head.clone(), self.slice.iter().cloned())
     fn clone(&self) -> Self {
         struct InProgressThinBox<Head, SliceItem> {
             raw: ptr::NonNull<ThinData<Head, SliceItem>>,
@@ -302,6 +366,9 @@ where
     }
 }
 
+/// A thin version of [`Arc`].
+///
+///   [`Arc`]: <https://doc.rust-lang.org/stable/std/sync/struct.Arc.html>
 pub struct ThinArc<Head, SliceItem> {
     raw: ErasedPtr,
     marker: PhantomData<Arc<ThinData<Head, SliceItem>>>,
@@ -310,6 +377,20 @@ pub struct ThinArc<Head, SliceItem> {
 thin_holder!(for ThinArc<Head, SliceItem> as Arc<ThinData<Head, SliceItem>> with fatten_const);
 
 impl<Head, SliceItem> ThinArc<Head, SliceItem> {
+    /// Create a new atomically reference counted `ThinData` with the given head and slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice iterator incorrectly reports its length.
+    ///
+    /// # Note on allocation
+    ///
+    /// This currently creates a `ThinBox` first and then moves that into an `Arc`.
+    /// This is required, because the heap layout of `Arc` is not stable,
+    /// and custom DSTs need to be manually allocated.
+    ///
+    /// This will be eliminated in the future if/when the
+    /// reference counted heap layout is stabilized.
     pub fn new<I>(head: Head, slice: I) -> Self
     where
         I: IntoIterator<Item = SliceItem>,
@@ -344,6 +425,9 @@ where
     }
 }
 
+/// A thin version of [`Rc`].
+///
+///   [`Rc`]: <https://doc.rust-lang.org/stable/std/rc/struct.Rc.html>
 pub struct ThinRc<Head, SliceItem> {
     raw: ErasedPtr,
     marker: PhantomData<Rc<ThinData<Head, SliceItem>>>,
@@ -352,6 +436,20 @@ pub struct ThinRc<Head, SliceItem> {
 thin_holder!(for ThinRc<Head, SliceItem> as Rc<ThinData<Head, SliceItem>> with fatten_const);
 
 impl<Head, SliceItem> ThinRc<Head, SliceItem> {
+    /// Create a new reference counted `ThinData` with the given head and slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice iterator incorrectly reports its length.
+    ///
+    /// # Note on allocation
+    ///
+    /// This currently creates a `ThinBox` first and then moves that into an `Rc`.
+    /// This is required, because the heap layout of `Rc` is not stable,
+    /// and custom DSTs need to be manually allocated.
+    ///
+    /// This will be eliminated in the future if/when the
+    /// reference counted heap layout is stabilized.
     pub fn new<I>(head: Head, slice: I) -> Self
     where
         I: IntoIterator<Item = SliceItem>,

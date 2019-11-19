@@ -1,3 +1,6 @@
+//! Polyfills for unstable features `slice_from_raw_parts` and `alloc_layout_extra`,
+//! along with a theoretical `fn repr_c` to compute `#[repr(C)]` layouts.
+
 pub(crate) use self::slice_from_raw_parts::{make_slice, make_slice_mut};
 
 #[cfg(not(slice_from_raw_parts))] // https://github.com/rust-lang/rust/issues/36925

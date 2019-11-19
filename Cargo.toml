@@ -1,11 +1,13 @@
 [package]
 name = "thin-dst"
-version = "1.0.0-beta.4"
+version = "1.0.0"
 edition = "2018"
 
 authors = ["cad97 <cad97@cad97.com>"]
 description = "Thin pointers to inline-slice dynamically sized types"
 
 repository = "https://github.com/cad97/thin-dst"
+readme = "README.md"
 keywords = ["thin", "thin-pointer", "dst"]
+categories = ["no-std", "data-structures", "memory-management"]
 license = "MIT OR Apache-2.0"
