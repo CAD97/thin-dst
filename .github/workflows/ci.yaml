@@ -78,4 +78,4 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: miri
-          args: test -- -- -Zunstable-options --exclude-should-panic
+          args: test
