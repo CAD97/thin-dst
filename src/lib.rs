@@ -126,15 +126,8 @@ impl<SliceItem: PartialEq> PartialEq<[SliceItem]> for ThinData<(), SliceItem> {
 }
 
 macro_rules! thin_holder {
-    ( for $thin:ident<Head, SliceItem> as $fat:ident<ThinData<Head, SliceItem>> with $fatten:ident ) => {
-        impl<Head, SliceItem> Drop for $thin<Head, SliceItem> {
-            fn drop(&mut self) {
-                let this = unsafe { $fat::from_raw(ThinData::$fatten(self.raw).as_ptr()) };
-                drop::<$fat<ThinData<Head, SliceItem>>>(this)
-            }
-        }
-
-        impl<Head, SliceItem> $thin<Head, SliceItem> {
+    ( #[nodrop] for $thin:ident<$($a:lifetime,)* Head, SliceItem> as $fat:ident<$($b:lifetime,)* ThinData<Head, SliceItem>> with $fatten:ident ) => {
+        impl<$($a,)* Head, SliceItem> $thin<$($a,)* Head, SliceItem> {
             /// Construct an owned pointer from an erased pointer.
             ///
             /// # Safety
@@ -157,8 +150,8 @@ macro_rules! thin_holder {
             }
         }
 
-        impl<Head, SliceItem> From<$fat<ThinData<Head, SliceItem>>> for $thin<Head, SliceItem> {
-            fn from(this: $fat<ThinData<Head, SliceItem>>) -> $thin<Head, SliceItem> {
+        impl<$($a,)* Head, SliceItem> From<$fat<$($b,)* ThinData<Head, SliceItem>>> for $thin<$($a,)* Head, SliceItem> {
+            fn from(this: $fat<$($b,)* ThinData<Head, SliceItem>>) -> $thin<$($a,)* Head, SliceItem> {
                 unsafe {
                     let this = ptr::NonNull::new_unchecked($fat::into_raw(this) as *mut _);
                     Self::from_erased(ThinData::<Head, SliceItem>::erase(this))
@@ -166,9 +159,9 @@ macro_rules! thin_holder {
             }
         }
 
-        impl<Head, SliceItem> Deref for $thin<Head, SliceItem>
+        impl<$($a,)* Head, SliceItem> Deref for $thin<$($a,)* Head, SliceItem>
         where
-            $fat<ThinData<Head, SliceItem>>: Deref,
+            $fat<$($b,)* ThinData<Head, SliceItem>>: Deref,
         {
             type Target = ThinData<Head, SliceItem>;
             fn deref(&self) -> &ThinData<Head, SliceItem> {
@@ -176,16 +169,16 @@ macro_rules! thin_holder {
             }
         }
 
-        impl<Head, SliceItem> DerefMut for $thin<Head, SliceItem>
+        impl<$($a,)* Head, SliceItem> DerefMut for $thin<$($a,)* Head, SliceItem>
         where
-            $fat<ThinData<Head, SliceItem>>: DerefMut,
+            $fat<$($b,)* ThinData<Head, SliceItem>>: DerefMut,
         {
             fn deref_mut(&mut self) -> &mut ThinData<Head, SliceItem> {
                 unsafe { &mut *ThinData::fatten_mut(self.raw).as_ptr() }
             }
         }
 
-        impl<Head, SliceItem> core::fmt::Debug for $thin<Head, SliceItem>
+        impl<$($a,)* Head, SliceItem> core::fmt::Debug for $thin<$($a,)* Head, SliceItem>
         where
             ThinData<Head, SliceItem>: core::fmt::Debug,
         {
@@ -194,20 +187,20 @@ macro_rules! thin_holder {
             }
         }
 
-        unsafe impl<Head, SliceItem> Send for $thin<Head, SliceItem> where
-            $fat<ThinData<Head, SliceItem>>: Send
+        unsafe impl<$($a,)* Head, SliceItem> Send for $thin<$($a,)* Head, SliceItem> where
+            $fat<$($b,)* ThinData<Head, SliceItem>>: Send
         {
         }
-        unsafe impl<Head, SliceItem> Sync for $thin<Head, SliceItem> where
-            $fat<ThinData<Head, SliceItem>>: Sync
+        unsafe impl<$($a,)* Head, SliceItem> Sync for $thin<$($a,)* Head, SliceItem> where
+            $fat<$($b,)* ThinData<Head, SliceItem>>: Sync
         {
         }
 
-        impl<Head, SliceItem> cmp::Eq for $thin<Head, SliceItem> where
+        impl<$($a,)* Head, SliceItem> cmp::Eq for $thin<$($a,)* Head, SliceItem> where
             ThinData<Head, SliceItem>: cmp::Eq
         {
         }
-        impl<Head, SliceItem> cmp::PartialEq for $thin<Head, SliceItem>
+        impl<$($a,)* Head, SliceItem> cmp::PartialEq for $thin<$($a,)* Head, SliceItem>
         where
             ThinData<Head, SliceItem>: cmp::PartialEq,
         {
@@ -216,7 +209,7 @@ macro_rules! thin_holder {
             }
         }
 
-        impl<Head, SliceItem> hash::Hash for $thin<Head, SliceItem>
+        impl<$($a,)* Head, SliceItem> hash::Hash for $thin<$($a,)* Head, SliceItem>
         where
             ThinData<Head, SliceItem>: hash::Hash,
         {
@@ -227,6 +220,16 @@ macro_rules! thin_holder {
                 <ThinData<Head, SliceItem> as hash::Hash>::hash(self, state)
             }
         }
+    };
+    ( for $thin:ident<$($a:lifetime,)* Head, SliceItem> as $fat:ident<$($b:lifetime,)* ThinData<Head, SliceItem>> with $fatten:ident ) => {
+        impl<$($a,)* Head, SliceItem> Drop for $thin<$($a,)* Head, SliceItem> {
+            fn drop(&mut self) {
+                let this = unsafe { $fat::from_raw(ThinData::$fatten(self.raw).as_ptr()) };
+                drop::<$fat<$($b,)* ThinData<Head, SliceItem>>>(this)
+            }
+        }
+
+        thin_holder!(#[nodrop] for $thin<$($a,)* Head, SliceItem> as $fat<$($b,)* ThinData<Head, SliceItem>> with $fatten );
     };
 }
 
@@ -481,5 +484,102 @@ where
             let this = ManuallyDrop::new(Rc::from_raw(ThinData::fatten_const(self.raw).as_ptr()));
             ManuallyDrop::into_inner(ManuallyDrop::clone(&this)).into()
         }
+    }
+}
+
+pub struct ThinRef<'a, Head, SliceItem> {
+    raw: ErasedPtr,
+    marker: PhantomData<&'a ThinData<Head, SliceItem>>,
+}
+
+thin_holder!(#[nodrop] for ThinRef<'a, Head, SliceItem> as Ref<'a, ThinData<Head, SliceItem>> with fatten_const);
+
+impl<'a, Head, SliceItem> Copy for ThinRef<'a, Head, SliceItem> where
+    &'a ThinData<Head, SliceItem>: Copy
+{
+}
+impl<'a, Head, SliceItem> Clone for ThinRef<'a, Head, SliceItem>
+where
+    &'a ThinData<Head, SliceItem>: Clone,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, Head, SliceItem> From<ThinRef<'a, Head, SliceItem>> for &'a ThinData<Head, SliceItem> {
+    fn from(this: ThinRef<'a, Head, SliceItem>) -> Self {
+        unsafe { Ref::from_raw(ThinData::fatten_const(this.raw).as_ptr()) }
+    }
+}
+
+pub struct ThinRefMut<'a, Head, SliceItem> {
+    raw: ErasedPtr,
+    marker: PhantomData<&'a mut ThinData<Head, SliceItem>>,
+}
+
+thin_holder!(#[nodrop] for ThinRefMut<'a, Head, SliceItem> as Ref<'a, ThinData<Head, SliceItem>> with fatten_const);
+
+impl<'a, Head, SliceItem> From<ThinRefMut<'a, Head, SliceItem>>
+    for &'a mut ThinData<Head, SliceItem>
+{
+    fn from(this: ThinRefMut<'a, Head, SliceItem>) -> Self {
+        unsafe { RefMut::from_raw(ThinData::fatten_mut(this.raw).as_ptr()) }
+    }
+}
+
+// helpers for implementing ThinRef[Mut] and ThinPtr[Mut]
+
+unsafe trait RawExt<T: ?Sized> {
+    unsafe fn from_raw(ptr: *const T) -> Self;
+    unsafe fn into_raw(self) -> *const T;
+}
+
+unsafe trait RawMutExt<T: ?Sized> {
+    unsafe fn from_raw(ptr: *mut T) -> Self;
+    unsafe fn into_raw(self) -> *mut T;
+}
+
+type Ref<'a, T> = &'a T;
+unsafe impl<'a, T: ?Sized> RawExt<T> for Ref<'a, T> {
+    unsafe fn from_raw(ptr: *const T) -> Self {
+        &*ptr
+    }
+
+    unsafe fn into_raw(self) -> *const T {
+        self
+    }
+}
+
+type RefMut<'a, T> = &'a mut T;
+unsafe impl<'a, T: ?Sized> RawMutExt<T> for RefMut<'a, T> {
+    unsafe fn from_raw(ptr: *mut T) -> Self {
+        &mut *ptr
+    }
+
+    unsafe fn into_raw(self) -> *mut T {
+        self
+    }
+}
+
+type Ptr<T> = *const T;
+unsafe impl<T: ?Sized> RawExt<T> for Ptr<T> {
+    unsafe fn from_raw(ptr: *const T) -> Self {
+        ptr
+    }
+
+    unsafe fn into_raw(self) -> *const T {
+        self
+    }
+}
+
+type PtrMut<T> = *mut T;
+unsafe impl<T: ?Sized> RawMutExt<T> for PtrMut<T> {
+    unsafe fn from_raw(ptr: *mut T) -> Self {
+        ptr
+    }
+
+    unsafe fn into_raw(self) -> *mut T {
+        self
     }
 }
