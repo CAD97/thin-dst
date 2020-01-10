@@ -429,10 +429,10 @@ impl<Head, SliceItem> ThinArc<Head, SliceItem> {
     }
 }
 
-impl<Head, SliceItem> Into<Arc<ThinData<Head, SliceItem>>> for ThinArc<Head, SliceItem> {
-    fn into(self) -> Arc<ThinData<Head, SliceItem>> {
+impl<Head, SliceItem> From<ThinArc<Head, SliceItem>> for Arc<ThinData<Head, SliceItem>> {
+    fn from(this: ThinArc<Head, SliceItem>) -> Self {
         unsafe {
-            let this = ManuallyDrop::new(self);
+            let this = ManuallyDrop::new(this);
             Arc::from_raw(ThinData::fatten_const(this.raw).as_ptr())
         }
     }
@@ -488,10 +488,10 @@ impl<Head, SliceItem> ThinRc<Head, SliceItem> {
     }
 }
 
-impl<Head, SliceItem> Into<Rc<ThinData<Head, SliceItem>>> for ThinRc<Head, SliceItem> {
-    fn into(self) -> Rc<ThinData<Head, SliceItem>> {
+impl<Head, SliceItem> From<ThinRc<Head, SliceItem>> for Rc<ThinData<Head, SliceItem>> {
+    fn from(this: ThinRc<Head, SliceItem>) -> Self {
         unsafe {
-            let this = ManuallyDrop::new(self);
+            let this = ManuallyDrop::new(this);
             Rc::from_raw(ThinData::fatten_const(this.raw).as_ptr())
         }
     }

@@ -13,7 +13,7 @@ jobs:
       - name: Install toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: beta
           override: true
       - name: Test with all features
         uses: actions-rs/cargo@v1
@@ -30,7 +30,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: beta
           override: true
           components: rustfmt
       - name: Check formatting
@@ -48,7 +48,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: beta
           override: true
           components: clippy
       - name: Check style
