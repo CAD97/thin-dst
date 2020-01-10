@@ -44,23 +44,25 @@ use {
         sync::Arc,
     },
     core::{
-        cmp, hash,
+        cmp::{self, PartialEq},
+        fmt::{self, Debug},
+        hash,
         marker::PhantomData,
         mem::ManuallyDrop,
         ops::{Deref, DerefMut},
-        ptr,
+        ptr::{self, NonNull},
     },
 };
 
 mod polyfill;
 
 /// An erased pointer with size and stride of one byte.
-pub type ErasedPtr = ptr::NonNull<priv_in_pub::Erased>;
+pub type ErasedPtr = NonNull<priv_in_pub::Erased>;
 #[doc(hidden)]
 pub mod priv_in_pub {
     // This MUST be size=1 such that pointer math actually advances the pointer.
     // FUTURE(extern_types): expose as `extern type` (breaking)
-    // This will require casting to ptr::NonNull<u8> everywhere for pointer offsetting.
+    // This will require casting to NonNull<u8> everywhere for pointer offsetting.
     // But that's not a bad thing. It would have saved a good deal of headache.
     pub struct Erased {
         #[allow(unused)]
@@ -98,24 +100,24 @@ pub struct ThinData<Head, SliceItem> {
 }
 
 impl<Head, SliceItem> ThinData<Head, SliceItem> {
-    fn len(ptr: ErasedPtr) -> ptr::NonNull<usize> {
+    fn len(ptr: ErasedPtr) -> NonNull<usize> {
         ptr.cast()
     }
 
-    fn erase(ptr: ptr::NonNull<Self>) -> ErasedPtr {
+    fn erase(ptr: NonNull<Self>) -> ErasedPtr {
         ptr.cast()
     }
 
-    unsafe fn fatten_const(ptr: ErasedPtr) -> ptr::NonNull<Self> {
+    unsafe fn fatten_const(ptr: ErasedPtr) -> NonNull<Self> {
         let len = ptr::read(Self::len(ptr).as_ptr());
         let slice = make_slice(ptr.cast::<SliceItem>().as_ptr(), len);
-        ptr::NonNull::new_unchecked(slice as *const Self as *mut Self)
+        NonNull::new_unchecked(slice as *const Self as *mut Self)
     }
 
-    unsafe fn fatten_mut(ptr: ErasedPtr) -> ptr::NonNull<Self> {
+    unsafe fn fatten_mut(ptr: ErasedPtr) -> NonNull<Self> {
         let len = ptr::read(Self::len(ptr).as_ptr());
         let slice = make_slice_mut(ptr.cast::<SliceItem>().as_ptr(), len);
-        ptr::NonNull::new_unchecked(slice as *mut Self)
+        NonNull::new_unchecked(slice as *mut Self)
     }
 }
 
@@ -153,7 +155,7 @@ macro_rules! thin_holder {
         impl<$($a,)* Head, SliceItem> From<$fat<$($b,)* ThinData<Head, SliceItem>>> for $thin<$($a,)* Head, SliceItem> {
             fn from(this: $fat<$($b,)* ThinData<Head, SliceItem>>) -> $thin<$($a,)* Head, SliceItem> {
                 unsafe {
-                    let this = ptr::NonNull::new_unchecked($fat::into_raw(this) as *mut _);
+                    let this = NonNull::new_unchecked($fat::into_raw(this) as *mut _);
                     Self::from_erased(ThinData::<Head, SliceItem>::erase(this))
                 }
             }
@@ -178,12 +180,15 @@ macro_rules! thin_holder {
             }
         }
 
-        impl<$($a,)* Head, SliceItem> core::fmt::Debug for $thin<$($a,)* Head, SliceItem>
+        impl<$($a,)* Head, SliceItem> Debug for $thin<$($a,)* Head, SliceItem>
         where
-            ThinData<Head, SliceItem>: core::fmt::Debug,
+            $fat<$($b,)* ThinData<Head, SliceItem>>: Debug,
         {
-            fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-                <ThinData<Head, SliceItem> as core::fmt::Debug>::fmt(self, f)
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                unsafe {
+                    let this = ManuallyDrop::new($fat::from_raw(ThinData::fatten_const(self.raw).as_ptr()));
+                    this.fmt(f)
+                }
             }
         }
 
@@ -197,27 +202,44 @@ macro_rules! thin_holder {
         }
 
         impl<$($a,)* Head, SliceItem> cmp::Eq for $thin<$($a,)* Head, SliceItem> where
-            ThinData<Head, SliceItem>: cmp::Eq
+            $fat<$($b,)* ThinData<Head, SliceItem>>: cmp::Eq,
         {
         }
-        impl<$($a,)* Head, SliceItem> cmp::PartialEq for $thin<$($a,)* Head, SliceItem>
+        impl<$($a,)* Head, SliceItem> PartialEq for $thin<$($a,)* Head, SliceItem>
         where
-            ThinData<Head, SliceItem>: cmp::PartialEq,
+            $fat<$($b,)* ThinData<Head, SliceItem>>: PartialEq,
         {
             fn eq(&self, other: &Self) -> bool {
-                <ThinData<Head, SliceItem> as cmp::PartialEq>::eq(self, other)
+                unsafe {
+                    let other = ManuallyDrop::new($fat::from_raw(ThinData::fatten_const(other.raw).as_ptr()));
+                    <Self as PartialEq<$fat<$($b,)* ThinData<Head, SliceItem>>>>::eq(self, &other)
+                }
+            }
+        }
+        impl<$($a,)* Head, SliceItem> PartialEq<$fat<$($b,)* ThinData<Head, SliceItem>>> for $thin<$($a,)* Head, SliceItem>
+        where
+            $fat<$($b,)* ThinData<Head, SliceItem>>: PartialEq,
+        {
+            fn eq(&self, other: &$fat<$($b,)* ThinData<Head, SliceItem>>) -> bool {
+                unsafe {
+                    let this = ManuallyDrop::new($fat::from_raw(ThinData::fatten_const(self.raw).as_ptr()));
+                    <$fat<$($b,)* ThinData<Head, SliceItem>> as PartialEq>::eq(&this, other)
+                }
             }
         }
 
         impl<$($a,)* Head, SliceItem> hash::Hash for $thin<$($a,)* Head, SliceItem>
         where
-            ThinData<Head, SliceItem>: hash::Hash,
+            $fat<$($b,)* ThinData<Head, SliceItem>>: hash::Hash,
         {
             fn hash<H>(&self, state: &mut H)
             where
                 H: hash::Hasher,
             {
-                <ThinData<Head, SliceItem> as hash::Hash>::hash(self, state)
+                unsafe {
+                    let this = ManuallyDrop::new($fat::from_raw(ThinData::fatten_const(self.raw).as_ptr()));
+                    <$fat<$($b,)* ThinData<Head, SliceItem>> as hash::Hash>::hash(&this, state)
+                }
             }
         }
     };
@@ -251,8 +273,8 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
         repr_c_3([length_layout, head_layout, slice_layout])
     }
 
-    unsafe fn alloc(len: usize, layout: Layout) -> ptr::NonNull<ThinData<Head, SliceItem>> {
-        let ptr: ErasedPtr = ptr::NonNull::new(alloc(layout))
+    unsafe fn alloc(len: usize, layout: Layout) -> NonNull<ThinData<Head, SliceItem>> {
+        let ptr: ErasedPtr = NonNull::new(alloc(layout))
             .unwrap_or_else(|| handle_alloc_error(layout))
             .cast();
         ptr::write(ThinData::<Head, SliceItem>::len(ptr).as_ptr(), len);
@@ -315,7 +337,7 @@ where
     //     ThinBox::new(self.head.clone(), self.slice.iter().cloned())
     fn clone(&self) -> Self {
         struct InProgressThinBox<Head, SliceItem> {
-            raw: ptr::NonNull<ThinData<Head, SliceItem>>,
+            raw: NonNull<ThinData<Head, SliceItem>>,
             len: usize,
             layout: Layout,
             head_offset: usize,
@@ -528,6 +550,50 @@ impl<'a, Head, SliceItem> From<ThinRefMut<'a, Head, SliceItem>>
     }
 }
 
+pub struct ThinPtr<Head, SliceItem> {
+    raw: ErasedPtr,
+    marker: PhantomData<NonNull<ThinData<Head, SliceItem>>>,
+}
+
+thin_holder!(#[nodrop] for ThinPtr<Head, SliceItem> as NonNull<ThinData<Head, SliceItem>> with fatten_mut);
+
+impl<Head, SliceItem> Copy for ThinPtr<Head, SliceItem> where
+    NonNull<ThinData<Head, SliceItem>>: Copy
+{
+}
+impl<Head, SliceItem> Clone for ThinPtr<Head, SliceItem>
+where
+    NonNull<ThinData<Head, SliceItem>>: Clone,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Head, SliceItem> From<ThinPtr<Head, SliceItem>> for NonNull<ThinData<Head, SliceItem>> {
+    fn from(this: ThinPtr<Head, SliceItem>) -> Self {
+        unsafe { ThinData::fatten_mut(this.raw) }
+    }
+}
+
+#[allow(
+    missing_docs,
+    clippy::missing_safety_doc,
+    clippy::should_implement_trait
+)]
+impl<Head, SliceItem> ThinPtr<Head, SliceItem> {
+    pub unsafe fn as_ptr(self) -> *mut ThinData<Head, SliceItem> {
+        let nn: NonNull<_> = self.into();
+        nn.as_ptr()
+    }
+    pub unsafe fn as_ref(&self) -> &ThinData<Head, SliceItem> {
+        &*self.as_ptr()
+    }
+    pub unsafe fn as_mut(&mut self) -> &mut ThinData<Head, SliceItem> {
+        &mut *self.as_ptr()
+    }
+}
+
 // helpers for implementing ThinRef[Mut] and ThinPtr[Mut]
 
 unsafe trait RawExt<T: ?Sized> {
@@ -562,24 +628,12 @@ unsafe impl<'a, T: ?Sized> RawMutExt<T> for RefMut<'a, T> {
     }
 }
 
-type Ptr<T> = *const T;
-unsafe impl<T: ?Sized> RawExt<T> for Ptr<T> {
-    unsafe fn from_raw(ptr: *const T) -> Self {
-        ptr
-    }
-
-    unsafe fn into_raw(self) -> *const T {
-        self
-    }
-}
-
-type PtrMut<T> = *mut T;
-unsafe impl<T: ?Sized> RawMutExt<T> for PtrMut<T> {
+unsafe impl<T: ?Sized> RawMutExt<T> for NonNull<T> {
     unsafe fn from_raw(ptr: *mut T) -> Self {
-        ptr
+        NonNull::new_unchecked(ptr)
     }
 
     unsafe fn into_raw(self) -> *mut T {
-        self
+        NonNull::as_ptr(self)
     }
 }
