@@ -292,6 +292,7 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
                 items.next().is_none(),
                 "ExactSizeIterator under-reported length"
             );
+            assert_eq!(layout, Layout::for_value(ptr.as_ref()));
             Self::from_erased(ThinData::erase(ptr))
         }
     }
