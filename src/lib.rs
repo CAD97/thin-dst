@@ -349,7 +349,7 @@ where
             fn drop(&mut self) {
                 let raw_ptr = ThinData::erase(self.raw).as_ptr();
                 unsafe {
-                    ptr::drop_in_place(raw_ptr.add(self.head_offset));
+                    ptr::drop_in_place(raw_ptr.add(self.head_offset).cast::<Head>());
                     let slice = make_slice_mut(
                         raw_ptr.add(self.slice_offset).cast::<SliceItem>(),
                         self.len,
