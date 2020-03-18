@@ -16,17 +16,16 @@ impl Clone for PanicsOnClone {
     }
 }
 
-fn test_box<B: Send + Clone + UnwindSafe + 'static, F: FnOnce(DontLeakMe, PanicsOnClone) -> B>(
+fn test_box<B: Clone + UnwindSafe + 'static, F: FnOnce(DontLeakMe, PanicsOnClone) -> B>(
     make_box: F,
 ) {
     let mut leak_detector = DontLeakMe(Arc::new(()));
     let boxed = make_box(leak_detector.clone(), PanicsOnClone);
 
-    std::thread::spawn(move || {
+    std::panic::catch_unwind(move || {
         let _unreachable = boxed.clone();
         // The above clone should panic.
     })
-    .join()
     .expect_err("PanicsOnClone didn't panic");
 
     // Now there should only be our copy of leak_detector still around!
