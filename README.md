@@ -4,6 +4,17 @@ Boxed custom DSTs that store a slice and the length of said slice inline.
 Uses the standard library collection types for full interoperability,
 and also provides thin owned pointers for space-conscious use.
 
+## Alternative
+
+[slice-dst] is a successor to this crate, which, along with the other
+[pointer-utils] crates, offers a more composable API.
+
+This crate will continue to be reactively maintained,
+but any future development will focus on pointer-utils/slice-dst instead.
+
+  [slice-dst]: <https://lib.rs/crates/slice-dst>
+  [pointer-utils]: <https://github.com/CAD97/pointer-utils>
+
 ## Examples
 
 The simplest example is just a boxed slice:

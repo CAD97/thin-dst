@@ -286,36 +286,89 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
     /// # Panics
     ///
     /// Panics if the slice iterator incorrectly reports its length.
-    /// Leaks everything on panic.
-    //  TODO: dont (see `Clone::clone`)
     pub fn new<I>(head: Head, slice: I) -> Self
     where
         I: IntoIterator<Item = SliceItem>,
         I::IntoIter: ExactSizeIterator, // + TrustedLen
     {
+        struct InProgress<Head, SliceItem> {
+            raw: NonNull<ThinData<Head, SliceItem>>,
+            written_len: usize,
+            layout: Layout,
+            head_offset: usize,
+            slice_offset: usize,
+        }
+
+        impl<Head, SliceItem> Drop for InProgress<Head, SliceItem> {
+            fn drop(&mut self) {
+                let raw_ptr = ThinData::erase(self.raw).as_ptr();
+                unsafe {
+                    let slice = make_slice_mut(
+                        raw_ptr.add(self.slice_offset).cast::<SliceItem>(),
+                        self.written_len,
+                    );
+                    ptr::drop_in_place(slice);
+                    dealloc(raw_ptr.cast(), self.layout);
+                }
+            }
+        }
+
+        impl<Head, SliceItem> InProgress<Head, SliceItem> {
+            fn raw_ptr(&self) -> ErasedPtr {
+                ThinData::erase(self.raw)
+            }
+
+            fn new(len: usize) -> Self {
+                let (layout, [_, head_offset, slice_offset]) =
+                    ThinBox::<Head, SliceItem>::layout(len)
+                        .unwrap_or_else(|e| panic!("oversize box: {}", e));
+                InProgress {
+                    raw: unsafe { ThinBox::alloc(len, layout) },
+                    written_len: 0,
+                    layout,
+                    head_offset,
+                    slice_offset,
+                }
+            }
+
+            unsafe fn push(&mut self, item: SliceItem) {
+                self.raw_ptr()
+                    .as_ptr()
+                    .add(self.slice_offset)
+                    .cast::<SliceItem>()
+                    .add(self.written_len)
+                    .write(item);
+                self.written_len += 1;
+            }
+
+            unsafe fn finish(self, head: Head) -> ThinBox<Head, SliceItem> {
+                let this = ManuallyDrop::new(self);
+                let ptr = this.raw_ptr();
+                ptr::write(ptr.as_ptr().add(this.head_offset).cast(), head);
+                let out = ThinBox::from_erased(ptr);
+                assert_eq!(this.layout, Layout::for_value(&*out));
+                out
+            }
+        }
+
         let mut items = slice.into_iter();
         let len = items.len();
-        let (layout, [_, head_offset, slice_offset]) =
-            Self::layout(len).unwrap_or_else(|e| panic!("oversize box: {}", e));
 
         unsafe {
-            let ptr = Self::alloc(len, layout);
-            let raw_ptr = ThinData::erase(ptr).as_ptr();
-            ptr::write(raw_ptr.add(head_offset).cast(), head);
-            let mut slice_ptr = raw_ptr.add(slice_offset).cast::<SliceItem>();
+            let mut this = InProgress::new(len);
+
             for _ in 0..len {
                 let slice_item = items
                     .next()
                     .expect("ExactSizeIterator over-reported length");
-                ptr::write(slice_ptr, slice_item);
-                slice_ptr = slice_ptr.offset(1);
+                this.push(slice_item);
             }
             assert!(
                 items.next().is_none(),
                 "ExactSizeIterator under-reported length"
             );
-            assert_eq!(layout, Layout::for_value(ptr.as_ref()));
-            Self::from_erased(ThinData::erase(ptr))
+
+            this.finish(head)
         }
     }
 }
@@ -337,58 +390,7 @@ where
     // TODO: this should be able to just be
     //     ThinBox::new(self.head.clone(), self.slice.iter().cloned())
     fn clone(&self) -> Self {
-        struct InProgressThinBox<Head, SliceItem> {
-            raw: NonNull<ThinData<Head, SliceItem>>,
-            len: usize,
-            layout: Layout,
-            head_offset: usize,
-            slice_offset: usize,
-        }
-
-        impl<Head, SliceItem> Drop for InProgressThinBox<Head, SliceItem> {
-            fn drop(&mut self) {
-                let raw_ptr = ThinData::erase(self.raw).as_ptr();
-                unsafe {
-                    ptr::drop_in_place(raw_ptr.add(self.head_offset).cast::<Head>());
-                    let slice = make_slice_mut(
-                        raw_ptr.add(self.slice_offset).cast::<SliceItem>(),
-                        self.len,
-                    );
-                    ptr::drop_in_place(slice);
-                    dealloc(raw_ptr.cast(), self.layout);
-                }
-            }
-        }
-
-        impl<Head, SliceItem> InProgressThinBox<Head, SliceItem> {
-            unsafe fn finish(self) -> ThinBox<Head, SliceItem> {
-                let this = ManuallyDrop::new(self);
-                ThinBox::from_erased(ThinData::erase(this.raw))
-            }
-        }
-
-        unsafe {
-            let this = ThinData::<Head, SliceItem>::fatten_const(self.raw);
-            let this = this.as_ref();
-            let len = this.len;
-            let (layout, [_, head_offset, slice_offset]) = Self::layout(len).unwrap();
-            let ptr = Self::alloc(len, layout);
-            let raw_ptr = ThinData::erase(ptr).as_ptr();
-            ptr::write(raw_ptr.add(head_offset).cast(), this.head.clone());
-            let mut in_progress = InProgressThinBox {
-                raw: ptr,
-                len: 0,
-                layout,
-                head_offset,
-                slice_offset,
-            };
-            let slice_ptr = raw_ptr.add(slice_offset).cast::<SliceItem>();
-            for slice_item in &this.slice {
-                ptr::write(slice_ptr.add(in_progress.len), slice_item.clone());
-                in_progress.len += 1;
-            }
-            in_progress.finish()
-        }
+        ThinBox::new(self.head.clone(), self.slice.iter().cloned())
     }
 }
 
