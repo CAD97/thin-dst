@@ -291,21 +291,21 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
         I: IntoIterator<Item = SliceItem>,
         I::IntoIter: ExactSizeIterator, // + TrustedLen
     {
-        struct InProgressThinBox<Head, SliceItem> {
+        struct InProgress<Head, SliceItem> {
             raw: NonNull<ThinData<Head, SliceItem>>,
-            len: usize,
+            written_len: usize,
             layout: Layout,
             head_offset: usize,
             slice_offset: usize,
         }
 
-        impl<Head, SliceItem> Drop for InProgressThinBox<Head, SliceItem> {
+        impl<Head, SliceItem> Drop for InProgress<Head, SliceItem> {
             fn drop(&mut self) {
                 let raw_ptr = ThinData::erase(self.raw).as_ptr();
                 unsafe {
                     let slice = make_slice_mut(
                         raw_ptr.add(self.slice_offset).cast::<SliceItem>(),
-                        self.len,
+                        self.written_len,
                     );
                     ptr::drop_in_place(slice);
                     dealloc(raw_ptr.cast(), self.layout);
@@ -313,10 +313,37 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
             }
         }
 
-        impl<Head, SliceItem> InProgressThinBox<Head, SliceItem> {
+        impl<Head, SliceItem> InProgress<Head, SliceItem> {
+            fn raw_ptr(&self) -> ErasedPtr {
+                ThinData::erase(self.raw)
+            }
+
+            fn new(len: usize) -> Self {
+                let (layout, [_, head_offset, slice_offset]) =
+                    ThinBox::<Head, SliceItem>::layout(len)
+                        .unwrap_or_else(|e| panic!("oversize box: {}", e));
+                InProgress {
+                    raw: unsafe { ThinBox::alloc(len, layout) },
+                    written_len: 0,
+                    layout,
+                    head_offset,
+                    slice_offset,
+                }
+            }
+
+            unsafe fn push(&mut self, item: SliceItem) {
+                self.raw_ptr()
+                    .as_ptr()
+                    .add(self.slice_offset)
+                    .cast::<SliceItem>()
+                    .add(self.written_len)
+                    .write(item);
+                self.written_len += 1;
+            }
+
             unsafe fn finish(self, head: Head) -> ThinBox<Head, SliceItem> {
                 let this = ManuallyDrop::new(self);
-                let ptr = ThinData::erase(this.raw);
+                let ptr = this.raw_ptr();
                 ptr::write(ptr.as_ptr().add(this.head_offset).cast(), head);
                 let out = ThinBox::from_erased(ptr);
                 assert_eq!(this.layout, Layout::for_value(&*out));
@@ -326,35 +353,22 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
 
         let mut items = slice.into_iter();
         let len = items.len();
-        let (layout, [_, head_offset, slice_offset]) =
-            Self::layout(len).unwrap_or_else(|e| panic!("oversize box: {}", e));
 
         unsafe {
-            let ptr = Self::alloc(len, layout);
-            let raw_ptr = ThinData::erase(ptr).as_ptr();
+            let mut this = InProgress::new(len);
 
-            let mut in_progress = InProgressThinBox {
-                raw: ptr,
-                len: 0,
-                layout,
-                head_offset,
-                slice_offset,
-            };
-
-            let slice_ptr = raw_ptr.add(slice_offset).cast::<SliceItem>();
             for _ in 0..len {
                 let slice_item = items
                     .next()
                     .expect("ExactSizeIterator over-reported length");
-                ptr::write(slice_ptr.add(in_progress.len), slice_item);
-                in_progress.len += 1;
+                this.push(slice_item);
             }
             assert!(
                 items.next().is_none(),
                 "ExactSizeIterator under-reported length"
             );
 
-            in_progress.finish(head)
+            this.finish(head)
         }
     }
 }
