@@ -11,3 +11,6 @@ readme = "README.md"
 keywords = ["thin", "thin-pointer", "dst"]
 categories = ["no-std", "data-structures", "memory-management"]
 license = "MIT OR Apache-2.0"
+
+[badges]
+maintenance = { status = "deprecated" }

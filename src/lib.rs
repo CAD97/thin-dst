@@ -286,57 +286,11 @@ impl<Head, SliceItem> ThinBox<Head, SliceItem> {
     /// # Panics
     ///
     /// Panics if the slice iterator incorrectly reports its length.
-    /// Leaks everything on panic.
-    //  TODO: dont (see `Clone::clone`)
     pub fn new<I>(head: Head, slice: I) -> Self
     where
         I: IntoIterator<Item = SliceItem>,
         I::IntoIter: ExactSizeIterator, // + TrustedLen
     {
-        let mut items = slice.into_iter();
-        let len = items.len();
-        let (layout, [_, head_offset, slice_offset]) =
-            Self::layout(len).unwrap_or_else(|e| panic!("oversize box: {}", e));
-
-        unsafe {
-            let ptr = Self::alloc(len, layout);
-            let raw_ptr = ThinData::erase(ptr).as_ptr();
-            ptr::write(raw_ptr.add(head_offset).cast(), head);
-            let mut slice_ptr = raw_ptr.add(slice_offset).cast::<SliceItem>();
-            for _ in 0..len {
-                let slice_item = items
-                    .next()
-                    .expect("ExactSizeIterator over-reported length");
-                ptr::write(slice_ptr, slice_item);
-                slice_ptr = slice_ptr.offset(1);
-            }
-            assert!(
-                items.next().is_none(),
-                "ExactSizeIterator under-reported length"
-            );
-            assert_eq!(layout, Layout::for_value(ptr.as_ref()));
-            Self::from_erased(ThinData::erase(ptr))
-        }
-    }
-}
-
-impl<Head, SliceItem> From<ThinBox<Head, SliceItem>> for Box<ThinData<Head, SliceItem>> {
-    fn from(this: ThinBox<Head, SliceItem>) -> Self {
-        unsafe {
-            let this = ManuallyDrop::new(this);
-            Box::from_raw(ThinData::fatten_mut(this.raw).as_ptr())
-        }
-    }
-}
-
-impl<Head, SliceItem> Clone for ThinBox<Head, SliceItem>
-where
-    Head: Clone,
-    SliceItem: Clone,
-{
-    // TODO: this should be able to just be
-    //     ThinBox::new(self.head.clone(), self.slice.iter().cloned())
-    fn clone(&self) -> Self {
         struct InProgressThinBox<Head, SliceItem> {
             raw: NonNull<ThinData<Head, SliceItem>>,
             len: usize,
@@ -367,14 +321,16 @@ where
             }
         }
 
+        let mut items = slice.into_iter();
+        let len = items.len();
+        let (layout, [_, head_offset, slice_offset]) =
+            Self::layout(len).unwrap_or_else(|e| panic!("oversize box: {}", e));
+
         unsafe {
-            let this = ThinData::<Head, SliceItem>::fatten_const(self.raw);
-            let this = this.as_ref();
-            let len = this.len;
-            let (layout, [_, head_offset, slice_offset]) = Self::layout(len).unwrap();
             let ptr = Self::alloc(len, layout);
             let raw_ptr = ThinData::erase(ptr).as_ptr();
-            ptr::write(raw_ptr.add(head_offset).cast(), this.head.clone());
+            ptr::write(raw_ptr.add(head_offset).cast(), head);
+
             let mut in_progress = InProgressThinBox {
                 raw: ptr,
                 len: 0,
@@ -382,13 +338,44 @@ where
                 head_offset,
                 slice_offset,
             };
+
             let slice_ptr = raw_ptr.add(slice_offset).cast::<SliceItem>();
-            for slice_item in &this.slice {
-                ptr::write(slice_ptr.add(in_progress.len), slice_item.clone());
+            for _ in 0..len {
+                let slice_item = items
+                    .next()
+                    .expect("ExactSizeIterator over-reported length");
+                ptr::write(slice_ptr.add(in_progress.len), slice_item);
                 in_progress.len += 1;
             }
-            in_progress.finish()
+            assert!(
+                items.next().is_none(),
+                "ExactSizeIterator under-reported length"
+            );
+            let out = in_progress.finish();
+            assert_eq!(layout, Layout::for_value(&*out));
+            out
         }
+    }
+}
+
+impl<Head, SliceItem> From<ThinBox<Head, SliceItem>> for Box<ThinData<Head, SliceItem>> {
+    fn from(this: ThinBox<Head, SliceItem>) -> Self {
+        unsafe {
+            let this = ManuallyDrop::new(this);
+            Box::from_raw(ThinData::fatten_mut(this.raw).as_ptr())
+        }
+    }
+}
+
+impl<Head, SliceItem> Clone for ThinBox<Head, SliceItem>
+where
+    Head: Clone,
+    SliceItem: Clone,
+{
+    // TODO: this should be able to just be
+    //     ThinBox::new(self.head.clone(), self.slice.iter().cloned())
+    fn clone(&self) -> Self {
+        ThinBox::new(self.head.clone(), self.slice.iter().cloned())
     }
 }
 
