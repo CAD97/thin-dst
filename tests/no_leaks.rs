@@ -1,5 +1,7 @@
 //! Test that we don't leak Head in ThinBox::clone().
 
+#![allow(unused, clippy::redundant_clone)]
+
 use std::panic::UnwindSafe;
 use std::sync::Arc;
 
